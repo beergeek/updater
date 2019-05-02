@@ -1,5 +1,6 @@
 try:
   import requests
+  import pprint
   #from requests import HTTPSession
   import configparser
   from requests.auth import HTTPDigestAuth
@@ -136,7 +137,7 @@ def main():
         # trigger flag to determine when tasking has been triggered
         status = False
 
-        # How many times should we check for all hosts to be in the desired state
+        # Check config is correct
         for i in timeout_range:
           time.sleep(10)
           aa_status = get('/groups/' + id + '/automationStatus')
@@ -159,8 +160,8 @@ def main():
           stdout=subprocess.PIPE, 
           stderr=subprocess.STDOUT)
         stdout,stderr = output.communicate()
-        print("STDOUT %s" % stdout)
-        print("STDERR %s" % stderr)
+        pprint.pprint("STDOUT %s" % stdout)
+        pprint.pprint("STDERR %s" % stderr)
         # Wait for reboot to occur
         time.sleep(30)
         print("Reconfiguring automation on %s back to normal" % host)
@@ -171,16 +172,17 @@ def main():
 
         # Check we are back and working
         for j in timeout_range:
+          # wait a bit.....
           time.sleep(10)
+          # get latest status of hosts
           finish_status = get('/groups/' + id + '/automationStatus')
           finish_status_value = get_status(finish_status, host, task_goal_version)
+          # If we the config is back to normal jump out the loop, or try again
           if finish_status_value == True:
-          # check up and running before break
             print("Host %s should be back online." % host)
             break
           else:
             print("Waiting for %s and service to be back online and goalVersion correct..." % host)
-      # check the time for the node to be down and that is back up and working before next host
       except requests.exceptions.RequestException as e:
         print("Error: %s. Reconfiguring automation on %s back to normal" % (e, host))
         put('/groups/' + id + '/automationConfig', ORIGINAL_STATE)
