@@ -6,6 +6,17 @@ The script interacts with Ops Manager to perform the rolling disabling and shutt
 
 # Usage
 
+You will need to do API whitelisting within Ops Manager (the user's account) for this script.
+
+There is a required config file `config.conf` that needs to be in the same directory as the Python script, with the following:
+
+```shell
+[Ops Manager]
+baseurl=<URL OF OPS MANAGER, WITH PORT>
+username=<USERNAME FOR OPS MANAGER>
+token=<ACCESS TOKEN FOR USER>
+```
+
 ```shell
 [ user@node ~]$ python3 update.py -h
 usage: update.py [-h] --project CONTEXT [--oh-dear-god] [--timeout TIMEOUT]
