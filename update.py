@@ -7,6 +7,7 @@ try:
   import json
   import time
   import subprocess
+  import copy
 except ImportError as e:
   print(e)
   exit(1)
@@ -24,8 +25,8 @@ token = config.get('Ops Manager','token')
 def get(endpoint):
   resp = requests.get(baseurl + endpoint, auth=HTTPDigestAuth(username, token), timeout=10)
   if resp.status_code == 200:
-    group_id = json.loads(resp.text)
-    return group_id
+    group_data = json.loads(resp.text)
+    return group_data
   else:
     print("Response was %s, not `200`" % resp.status_code)
     raise requests.exceptions.RequestException
@@ -52,15 +53,16 @@ def get_list_of_nodes(aa_config):
   return hosts
 
 def disable_node_aa(aa_config, node):
+  temp_config = copy.deepcopy(aa_config)
   process_tmp = []
-  for instance in aa_config['processes']:
+  for instance in temp_config['processes']:
     if instance['hostname'] == node:
       instance['disabled'] = True
     else:
       instance['disabled'] = False
     process_tmp.append(instance)
-  aa_config['processes'] = process_tmp
-  return aa_config
+  temp_config['processes'] = process_tmp
+  return temp_config
 
 def reconfig_aa(config, project_id):
   header = {'Content-Type': 'application/json'}
@@ -73,17 +75,19 @@ def reconfig_aa(config, project_id):
 
 # We need to determine if all nodes are in the desired state.
 # Return `False` for any node found not in the desired state.
-def get_status(status_data, hostname):
+def get_status(status_data, hostname, previous_goal_version):
   host_found = True
-  for host in status_data['processes']:
-    if host['hostname'] == hostname:
-      host_found = True
-    if status_data['goalVersion'] != host['lastGoalVersionAchieved']:
-      return False
-  if host_found == False:
-    print('Cannot find host in processes list')
-    raise IndexError
-  return True
+  if previous_goal_version != status_data['goalVersion']:
+    for host in status_data['processes']:
+      if host['hostname'] == hostname:
+        host_found = True
+      if status_data['goalVersion'] != host['lastGoalVersionAchieved']:
+        return False
+    if host_found == False:
+      print('Cannot find host in processes list')
+      raise IndexError
+    return True
+  return False
 
 # main
 def main():
@@ -103,15 +107,15 @@ def main():
     id = get('/groups/byName/' + args.context)['id']
 
     # Retrieve the original/current state of the standalone/replica set/sharded cluster
-    original_state = get('/groups/' + id + '/automationConfig')
+    ORIGINAL_STATE = get('/groups/' + id + '/automationConfig')
 
     # If any node is in the `disabled` state throw an error,
     # unless you are using the evil `force` option
     if 'force' not in args:
-      initial_check(original_state)
+      initial_check(ORIGINAL_STATE)
 
     # Get list of hosts for the Project
-    hosts = get_list_of_nodes(original_state)
+    hosts = get_list_of_nodes(ORIGINAL_STATE)
 
     # Cycle through each host to:
     # * disable
@@ -126,54 +130,60 @@ def main():
 
         # Get current GoalState and disable the host of interest
         original_goal_version = get('/groups/' + id + '/automationStatus')['goalVersion']
-        print("Original Goal Version: %s" % original_goal_version)
-        tmp_config = disable_node_aa(original_state, host)
+        tmp_config = disable_node_aa(ORIGINAL_STATE, host)
         put('/groups/' + id + '/automationConfig', tmp_config)
 
         # trigger flag to determine when tasking has been triggered
-        tasking_triggered = False
+        status = False
 
         # How many times should we check for all hosts to be in the desired state
         for i in timeout_range:
           time.sleep(10)
           aa_status = get('/groups/' + id + '/automationStatus')
-          print("Current Goal Version: %s" % aa_status['goalVersion'])
-          get_status_value = get_status(aa_status, host)
+          get_status_value = get_status(aa_status, host, original_goal_version)
           print("Automation status up to date: %s" % get_status_value)
           if get_status_value == True:
-            if tasking_triggered:
-              finish_status = get('/groups/' + id + '/automationStatus')
-              finish_status_value = get_status(finish_status, host)
-              if finish_status_value == True:
-              # check up and running before break
-                print("Host %s should be back online." % host)
-                break
-              else:
-                print("Waiting for %s and service to be back online..." % host)
-            else:
-              print("Performing upgrade tasks for %s" % host)
-              # this is where we actually trigger the upgrade to OS
-              tasking_triggered = True
-
-              # execute the command
-              output = subprocess.Popen(['ssh','-o StrictHostKeyChecking=no', '-i', args.ssh_key, args.ssh_user + "@" + host, args.command_string], 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.STDOUT)
-              stdout,stderr = output.communicate()
-              print("STDOUT %s" % stdout)
-              print("STDERR %s" % stderr)
-              # Wait for reboot to occur
-              time.sleep(15)
-              print("Reconfiguring automation on %s back to normal" % host)
-              put('/groups/' + id + '/automationConfig', original_state)
-              # wait for automation to trigger
-              time.sleep(15)
+            status = True
+            break
           else:
             print("Waiting for goalVersion to be correct on all hosts...")
+        
+        # Did we exceed our time limits?
+        if status == False:
+          print("Time exceeded for %s, exiting" % host)
+          exit(1)
+        
+        print("Performing upgrade tasks for %s" % host)
+        # execute the command
+        output = subprocess.Popen(['ssh','-o StrictHostKeyChecking=no', '-i', args.ssh_key, args.ssh_user + "@" + host, args.command_string], 
+          stdout=subprocess.PIPE, 
+          stderr=subprocess.STDOUT)
+        stdout,stderr = output.communicate()
+        print("STDOUT %s" % stdout)
+        print("STDERR %s" % stderr)
+        # Wait for reboot to occur
+        time.sleep(30)
+        print("Reconfiguring automation on %s back to normal" % host)
+        task_goal_version = get('/groups/' + id + '/automationStatus')['goalVersion']
+        put('/groups/' + id + '/automationConfig', ORIGINAL_STATE)
+        # wait for automation to trigger
+        time.sleep(15)
+
+        # Check we are back and working
+        for j in timeout_range:
+          time.sleep(10)
+          finish_status = get('/groups/' + id + '/automationStatus')
+          finish_status_value = get_status(finish_status, host, task_goal_version)
+          if finish_status_value == True:
+          # check up and running before break
+            print("Host %s should be back online." % host)
+            break
+          else:
+            print("Waiting for %s and service to be back online and goalVersion correct..." % host)
       # check the time for the node to be down and that is back up and working before next host
       except requests.exceptions.RequestException as e:
         print("Error: %s. Reconfiguring automation on %s back to normal" % (e, host))
-        put('/groups/' + id + '/automationConfig', original_state)
+        put('/groups/' + id + '/automationConfig', ORIGINAL_STATE)
         exit(1)
   except requests.exceptions.RequestException as e:
     print("Error %s" % e)
