@@ -177,7 +177,7 @@ def main():
           # get latest status of hosts
           finish_status = get('/groups/' + id + '/automationStatus')
           finish_status_value = get_status(finish_status, host, task_goal_version)
-          # If we the config is back to normal jump out the loop, or try again
+          # If the config is back to normal jump out the loop, or try again
           if finish_status_value == True:
             print("Host %s should be back online." % host)
             break
