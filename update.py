@@ -1,7 +1,6 @@
 try:
   import requests
   import pprint
-  #from requests import HTTPSession
   import configparser
   from requests.auth import HTTPDigestAuth
   import argparse
@@ -19,9 +18,6 @@ config.read('config.conf')
 baseurl = config.get('Ops Manager','baseurl')
 username = config.get('Ops Manager', 'username')
 token = config.get('Ops Manager','token')
-
-#session = requests.Session()
-#session.auth = HTTPDigestAuth(username, token)
 
 def get(endpoint):
   resp = requests.get(baseurl + endpoint, auth=HTTPDigestAuth(username, token), timeout=10)
@@ -64,15 +60,6 @@ def disable_node_aa(aa_config, node):
     process_tmp.append(instance)
   temp_config['processes'] = process_tmp
   return temp_config
-
-def reconfig_aa(config, project_id):
-  header = {'Content-Type': 'application/json'}
-  resp = requests.put(baseurl + '/groups/' + project_id + '/automationConfig', auth=HTTPDigestAuth(username, token), timeout=10, data=json.dumps(config), headers=header)
-  if resp.status_code == 200:
-    return resp
-  else:
-    print("Response was %s, not `200`" % resp.status_code)
-    raise requests.exceptions.RequestException
 
 # We need to determine if all nodes are in the desired state.
 # Return `False` for any node found not in the desired state.
