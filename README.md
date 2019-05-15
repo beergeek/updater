@@ -18,10 +18,10 @@ token=<ACCESS TOKEN FOR USER>
 ```
 
 ```shell
-[ user@node ~]$ python3 update.py -h
+[ user@node ~]$ python update.py -h
 usage: update.py [-h] --project CONTEXT [--oh-dear-god] [--timeout TIMEOUT]
-                 [--ssh-user SSH_USER] --ssh-key SSH_KEY
-                 [--command COMMAND_STRING]
+                 [--ssh-user SSH_USER] --ssh-key SSH_KEY [--ca-cert CA_CERT]
+                 [--key SSL_KEY] [--command COMMAND_STRING]
 
 Script to perform a database zero-downtime upgrade for the operating system
 
@@ -38,6 +38,8 @@ optional arguments:
                         SSH user to trigger OS command. Default os `root`
   --ssh-key SSH_KEY, -k SSH_KEY
                         SSH user to trigger OS command
+  --ca-cert CA_CERT     Absolute path to CA cert, if required
+  --key SSL_KEY         Absolute path to SSL key (pem file), if required
   --command COMMAND_STRING, -c COMMAND_STRING
                         The command to trigger for the OS. Default is
                         "date;hostname;subscription-manager refresh;rm -rf
