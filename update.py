@@ -8,6 +8,9 @@ try:
   import time
   import subprocess
   import copy
+  import urllib3
+  urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+  urllib3.disable_warnings(urllib3.exceptions.SubjectAltNameWarning)
 except ImportError as e:
   print(e)
   exit(1)
@@ -19,22 +22,24 @@ baseurl = config.get('Ops Manager','baseurl')
 username = config.get('Ops Manager', 'username')
 token = config.get('Ops Manager','token')
 
-def get(endpoint):
-  resp = requests.get(baseurl + endpoint, auth=HTTPDigestAuth(username, token), timeout=10)
+def get(endpoint, ca_cert_path='', key=''):
+  resp = requests.get(baseurl + endpoint, auth=HTTPDigestAuth(username, token), verify=ca_cert_path, cert=key, timeout=10)
   if resp.status_code == 200:
     group_data = json.loads(resp.text)
     return group_data
   else:
-    print("Response was %s, not `200`" % resp.status_code)
+    print("GET response was %s, not `200`" % resp.status_code)
+    print(resp.text)
     raise requests.exceptions.RequestException
 
-def put(endpoint, config):
+def put(endpoint, config, ca_cert_path='', key=''):
   header = {'Content-Type': 'application/json'}
-  resp = requests.put(baseurl + endpoint, auth=HTTPDigestAuth(username, token), timeout=10, data=json.dumps(config), headers=header)
+  resp = requests.put(baseurl + endpoint, auth=HTTPDigestAuth(username, token), verify=ca_cert_path, cert=key, timeout=10, data=json.dumps(config), headers=header)
   if resp.status_code == 200:
     return resp
   else:
-    print("Response was %s, not `200`" % resp.status_code)
+    print("PUT response was %s, not `200`" % resp.status_code)
+    print(resp.text)
     raise requests.exceptions.RequestException
 
 def initial_check(data):
@@ -86,16 +91,21 @@ def main():
     parser.add_argument('--timeout', '-t', dest='timeout', default=10, help="Number of minutes to wait for the configuration to be correct. Default is 10 minutes")
     parser.add_argument('--ssh-user', '-s', dest='ssh_user', default='root', help="SSH user to trigger OS command. Default os `root`")
     parser.add_argument('--ssh-key', '-k', dest='ssh_key', required=True, help="SSH user to trigger OS command")
+    parser.add_argument('--ca-cert', dest='ca_cert', default='', required=False, help="Absolute path to CA cert, if required")
+    parser.add_argument('--key', dest='ssl_key', default='', required=False, help="Absolute path to SSL key (pem file), if required")
     parser.add_argument('--command', '-c', dest='command_string', default="date;hostname;subscription-manager refresh;rm -rf /var/cache/yum/;yum -y update;echo $?;tail -10 /var/log/yum.log;reboot &>/dev/null & exit", help="The command to trigger for the OS. Default is \"date;hostname;subscription-manager refresh;rm -rf /var/cache/yum/;yum -y update;echo $?;tail -10 /var/log/yum.log;reboot &>/dev/null & exit\"")
     args = parser.parse_args()
 
     timeout_range = range(args.timeout)
+    ca_cert = args.ca_cert
+    ssl_key = args.ssl_key
 
     # Get our Group ID for the Project/Context
-    id = get('/groups/byName/' + args.context)['id']
+    print('Getting current state...')
+    id = get('/groups/byName/' + args.context, ca_cert, ssl_key)['id']
 
     # Retrieve the original/current state of the standalone/replica set/sharded cluster
-    ORIGINAL_STATE = get('/groups/' + id + '/automationConfig')
+    ORIGINAL_STATE = get('/groups/' + id + '/automationConfig', ca_cert, ssl_key)
 
     # If any node is in the `disabled` state throw an error,
     # unless you are using the evil `force` option
@@ -117,9 +127,9 @@ def main():
         print("Reconfiguring automation on %s" % host)
 
         # Get current GoalState and disable the host of interest
-        original_goal_version = get('/groups/' + id + '/automationStatus')['goalVersion']
+        original_goal_version = get('/groups/' + id + '/automationStatus', ca_cert, ssl_key)['goalVersion']
         tmp_config = disable_node_aa(ORIGINAL_STATE, host)
-        put('/groups/' + id + '/automationConfig', tmp_config)
+        put('/groups/' + id + '/automationConfig', tmp_config, ca_cert, ssl_key)
 
         # trigger flag to determine when tasking has been triggered
         status = False
@@ -127,7 +137,7 @@ def main():
         # Check config is correct
         for i in timeout_range:
           time.sleep(10)
-          aa_status = get('/groups/' + id + '/automationStatus')
+          aa_status = get('/groups/' + id + '/automationStatus', ca_cert, ssl_key)
           get_status_value = get_status(aa_status, host, original_goal_version)
           print("Automation status up to date: %s" % get_status_value)
           if get_status_value == True:
@@ -147,13 +157,13 @@ def main():
           stdout=subprocess.PIPE, 
           stderr=subprocess.STDOUT)
         stdout,stderr = output.communicate()
-        pprint.pprint("STDOUT %s" % stdout)
-        pprint.pprint("STDERR %s" % stderr)
+        print("STDERR %s" % stderr)
+        print("STDOUT %s" % stdout)
         # Wait for reboot to occur
         time.sleep(30)
         print("Reconfiguring automation on %s back to normal" % host)
-        task_goal_version = get('/groups/' + id + '/automationStatus')['goalVersion']
-        put('/groups/' + id + '/automationConfig', ORIGINAL_STATE)
+        task_goal_version = get('/groups/' + id + '/automationStatus', ca_cert, ssl_key)['goalVersion']
+        put('/groups/' + id + '/automationConfig', ORIGINAL_STATE, ca_cert, ssl_key)
         # wait for automation to trigger
         time.sleep(15)
 
@@ -162,7 +172,7 @@ def main():
           # wait a bit.....
           time.sleep(10)
           # get latest status of hosts
-          finish_status = get('/groups/' + id + '/automationStatus')
+          finish_status = get('/groups/' + id + '/automationStatus', ca_cert, ssl_key)
           finish_status_value = get_status(finish_status, host, task_goal_version)
           # If the config is back to normal jump out the loop, or try again
           if finish_status_value == True:
@@ -172,7 +182,7 @@ def main():
             print("Waiting for %s and service to be back online and goalVersion correct..." % host)
       except requests.exceptions.RequestException as e:
         print("Error: %s. Reconfiguring automation on %s back to normal" % (e, host))
-        put('/groups/' + id + '/automationConfig', ORIGINAL_STATE)
+        put('/groups/' + id + '/automationConfig', ORIGINAL_STATE, ca_cert, ssl_key)
         exit(1)
   except requests.exceptions.RequestException as e:
     print("Error %s" % e)
