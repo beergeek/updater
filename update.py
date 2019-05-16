@@ -1,6 +1,5 @@
 try:
   import requests
-  import pprint
   import configparser
   from requests.auth import HTTPDigestAuth
   import argparse
