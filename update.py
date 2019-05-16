@@ -82,6 +82,11 @@ def get_status(status_data, hostname, previous_goal_version):
     return True
   return False
 
+def reset_config_data(status_data):
+  for instance in status_data['processes']:
+    instance['disabled'] = False
+  return status_data
+
 # main
 def main():
   try:
@@ -93,12 +98,14 @@ def main():
     parser.add_argument('--ssh-key', '-k', dest='ssh_key', required=True, help="SSH user to trigger OS command")
     parser.add_argument('--ca-cert', dest='ca_cert', default='', required=False, help="Absolute path to CA cert, if required")
     parser.add_argument('--key', dest='ssl_key', default='', required=False, help="Absolute path to SSL key (pem file), if required")
+    parser.add_argument('--reset', action='store_true', default=False, dest='reset_config', required=False, help="reset the config to all ensure `disable` is not set, then exit")
     parser.add_argument('--command', '-c', dest='command_string', default="date;hostname;subscription-manager refresh;rm -rf /var/cache/yum/;yum -y update;echo $?;tail -10 /var/log/yum.log;reboot &>/dev/null & exit", help="The command to trigger for the OS. Default is \"date;hostname;subscription-manager refresh;rm -rf /var/cache/yum/;yum -y update;echo $?;tail -10 /var/log/yum.log;reboot &>/dev/null & exit\"")
     args = parser.parse_args()
 
     timeout_range = range(args.timeout)
     ca_cert = args.ca_cert
     ssl_key = args.ssl_key
+    reset_config = args.reset_config
 
     # Get our Group ID for the Project/Context
     print('Getting current state...')
@@ -107,83 +114,90 @@ def main():
     # Retrieve the original/current state of the standalone/replica set/sharded cluster
     ORIGINAL_STATE = get('/groups/' + id + '/automationConfig', ca_cert, ssl_key)
 
-    # If any node is in the `disabled` state throw an error,
-    # unless you are using the evil `force` option
-    if 'force' not in args:
-      initial_check(ORIGINAL_STATE)
+    # Reset to disabled=false if option specified, and then exit
+    if reset_config:
+      fixed_config = reset_config_data(ORIGINAL_STATE)
+      print('Resetting data....')
+      put('/groups/' + id + '/automationConfig', fixed_config, ca_cert, ssl_key)
+    else:
 
-    # Get list of hosts for the Project
-    hosts = get_list_of_nodes(ORIGINAL_STATE)
+      # If any node is in the `disabled` state throw an error,
+      # unless you are using the evil `force` option
+      if 'force' not in args:
+        initial_check(ORIGINAL_STATE)
 
-    # Cycle through each host to:
-    # * disable
-    # * check state of all hosts
-    # * fire off OS tasking
-    # * enable host
-    # * check state of all hosts
-    # * rinse and repeat for next host
-    for host in hosts:
-      try:
-        print("Reconfiguring automation on %s" % host)
+      # Get list of hosts for the Project
+      hosts = get_list_of_nodes(ORIGINAL_STATE)
 
-        # Get current GoalState and disable the host of interest
-        original_goal_version = get('/groups/' + id + '/automationStatus', ca_cert, ssl_key)['goalVersion']
-        tmp_config = disable_node_aa(ORIGINAL_STATE, host)
-        put('/groups/' + id + '/automationConfig', tmp_config, ca_cert, ssl_key)
+      # Cycle through each host to:
+      # * disable
+      # * check state of all hosts
+      # * fire off OS tasking
+      # * enable host
+      # * check state of all hosts
+      # * rinse and repeat for next host
+      for host in hosts:
+        try:
+          print("Reconfiguring automation on %s" % host)
 
-        # trigger flag to determine when tasking has been triggered
-        status = False
+          # Get current GoalState and disable the host of interest
+          original_goal_version = get('/groups/' + id + '/automationStatus', ca_cert, ssl_key)['goalVersion']
+          tmp_config = disable_node_aa(ORIGINAL_STATE, host)
+          put('/groups/' + id + '/automationConfig', tmp_config, ca_cert, ssl_key)
 
-        # Check config is correct
-        for i in timeout_range:
-          time.sleep(10)
-          aa_status = get('/groups/' + id + '/automationStatus', ca_cert, ssl_key)
-          get_status_value = get_status(aa_status, host, original_goal_version)
-          print("Automation status up to date: %s" % get_status_value)
-          if get_status_value == True:
-            status = True
-            break
-          else:
-            print("Waiting for goalVersion to be correct on all hosts...")
-        
-        # Did we exceed our time limits?
-        if status == False:
-          print("Time exceeded for %s, exiting" % host)
+          # trigger flag to determine when tasking has been triggered
+          status = False
+
+          # Check config is correct
+          for i in timeout_range:
+            time.sleep(10)
+            aa_status = get('/groups/' + id + '/automationStatus', ca_cert, ssl_key)
+            get_status_value = get_status(aa_status, host, original_goal_version)
+            print("Automation status up to date: %s" % get_status_value)
+            if get_status_value == True:
+              status = True
+              break
+            else:
+              print("Waiting for goalVersion to be correct on all hosts...")
+
+          # Did we exceed our time limits?
+          if status == False:
+            print("Time exceeded for %s, exiting" % host)
+            exit(1)
+
+          print("Performing upgrade tasks for %s" % host)
+          # execute the command
+          output = subprocess.Popen(['ssh','-o StrictHostKeyChecking=no', '-i', args.ssh_key, args.ssh_user + "@" + host, args.command_string], 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.STDOUT)
+          stdout,stderr = output.communicate()
+          print("STDERR %s" % stderr)
+          print("STDOUT %s" % stdout)
+          # Wait for reboot to occur
+          time.sleep(30)
+          print("Reconfiguring automation on %s back to normal" % host)
+          task_goal_version = get('/groups/' + id + '/automationStatus', ca_cert, ssl_key)['goalVersion']
+          put('/groups/' + id + '/automationConfig', ORIGINAL_STATE, ca_cert, ssl_key)
+          # wait for automation to trigger
+          time.sleep(15)
+
+          # Check we are back and working
+          for j in timeout_range:
+            # wait a bit.....
+            time.sleep(10)
+            # get latest status of hosts
+            finish_status = get('/groups/' + id + '/automationStatus', ca_cert, ssl_key)
+            finish_status_value = get_status(finish_status, host, task_goal_version)
+            # If the config is back to normal jump out the loop, or try again
+            if finish_status_value == True:
+              print("Host %s should be back online." % host)
+              break
+            else:
+              print("Waiting for %s and service to be back online and goalVersion correct..." % host)
+        except requests.exceptions.RequestException as e:
+          print("Error: %s. Reconfiguring automation on %s back to normal" % (e, host))
+          put('/groups/' + id + '/automationConfig', ORIGINAL_STATE, ca_cert, ssl_key)
           exit(1)
-        
-        print("Performing upgrade tasks for %s" % host)
-        # execute the command
-        output = subprocess.Popen(['ssh','-o StrictHostKeyChecking=no', '-i', args.ssh_key, args.ssh_user + "@" + host, args.command_string], 
-          stdout=subprocess.PIPE, 
-          stderr=subprocess.STDOUT)
-        stdout,stderr = output.communicate()
-        print("STDERR %s" % stderr)
-        print("STDOUT %s" % stdout)
-        # Wait for reboot to occur
-        time.sleep(30)
-        print("Reconfiguring automation on %s back to normal" % host)
-        task_goal_version = get('/groups/' + id + '/automationStatus', ca_cert, ssl_key)['goalVersion']
-        put('/groups/' + id + '/automationConfig', ORIGINAL_STATE, ca_cert, ssl_key)
-        # wait for automation to trigger
-        time.sleep(15)
-
-        # Check we are back and working
-        for j in timeout_range:
-          # wait a bit.....
-          time.sleep(10)
-          # get latest status of hosts
-          finish_status = get('/groups/' + id + '/automationStatus', ca_cert, ssl_key)
-          finish_status_value = get_status(finish_status, host, task_goal_version)
-          # If the config is back to normal jump out the loop, or try again
-          if finish_status_value == True:
-            print("Host %s should be back online." % host)
-            break
-          else:
-            print("Waiting for %s and service to be back online and goalVersion correct..." % host)
-      except requests.exceptions.RequestException as e:
-        print("Error: %s. Reconfiguring automation on %s back to normal" % (e, host))
-        put('/groups/' + id + '/automationConfig', ORIGINAL_STATE, ca_cert, ssl_key)
-        exit(1)
   except requests.exceptions.RequestException as e:
     print("Error %s" % e)
     exit(1)
